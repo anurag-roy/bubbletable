@@ -24,4 +24,4 @@ node_modules/
 # OS specific
 .DS_Store
 
-tui-data-table
+bubbletable
