@@ -1,4 +1,4 @@
-module github.com/anurag-roy/tui-data-table
+module github.com/anurag-roy/bubbletable
 
 go 1.23.0
 
