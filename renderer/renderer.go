@@ -1,65 +1,40 @@
-package ui
+package renderer
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
-	"tui-data-table/internal/table"
-
-	"github.com/charmbracelet/lipgloss"
+	"github.com/anurag-roy/bubbletable/table"
 )
 
 // TableRenderer handles rendering tables with proper styling and layout
 type TableRenderer struct {
 	terminalWidth  int
 	terminalHeight int
-	styles         TableStyles
+	theme          Theme
 }
 
-// TableStyles contains all styling for table components
-type TableStyles struct {
-	Header      lipgloss.Style
-	Cell        lipgloss.Style
-	SelectedRow lipgloss.Style
-	Border      lipgloss.Style
-	Status      lipgloss.Style
-}
-
-// NewTableRenderer creates a new table renderer with default styles
+// NewTableRenderer creates a new table renderer with the default theme
 func NewTableRenderer(width, height int) *TableRenderer {
 	return &TableRenderer{
 		terminalWidth:  width,
 		terminalHeight: height,
-		styles:         getDefaultTableStyles(),
+		theme:          DefaultTheme,
 	}
 }
 
-// getDefaultTableStyles returns the default styling for table components
-func getDefaultTableStyles() TableStyles {
-	return TableStyles{
-		Header: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#282A36")).
-			Background(lipgloss.Color("#C4A9F4")).
-			Bold(true).
-			Padding(0, 1),
-
-		Cell: lipgloss.NewStyle().
-			Padding(0, 1),
-
-		SelectedRow: lipgloss.NewStyle().
-			Background(lipgloss.Color("#44475A")).
-			Foreground(lipgloss.Color("#F8F8F2")).
-			Padding(0, 1),
-
-		Border: lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#874BFD")),
-
-		Status: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6272A4")).
-			Italic(true),
+// NewTableRendererWithTheme creates a new table renderer with a custom theme
+func NewTableRendererWithTheme(width, height int, theme Theme) *TableRenderer {
+	return &TableRenderer{
+		terminalWidth:  width,
+		terminalHeight: height,
+		theme:          theme,
 	}
+}
+
+// SetTheme updates the renderer's theme
+func (r *TableRenderer) SetTheme(theme Theme) {
+	r.theme = theme
 }
 
 // UpdateSize updates the terminal dimensions
@@ -88,7 +63,7 @@ func (r *TableRenderer) RenderTable(tbl *table.Table, currentPage int, selectedR
 
 	// Header row with sort indicators
 	headerRow := r.buildTableRow(adjustedColumns, func(i int, col table.Column) string {
-		headerText := col.Name
+		headerText := col.Header
 
 		// Add sort indicator if this column is currently sorted
 		sortIndicator := ""
@@ -123,7 +98,7 @@ func (r *TableRenderer) RenderTable(tbl *table.Table, currentPage int, selectedR
 			}
 		}
 
-		return r.styles.Header.Width(col.Width).Render(finalHeader)
+		return r.theme.Header.Width(col.Width).Render(finalHeader)
 	})
 	tableRows = append(tableRows, headerRow)
 
@@ -138,27 +113,26 @@ func (r *TableRenderer) RenderTable(tbl *table.Table, currentPage int, selectedR
 
 		dataRow := r.buildTableRow(adjustedColumns, func(colIndex int, col table.Column) string {
 			cellValue := ""
+			var cellVal interface{}
 			if colIndex < len(row.Cells) {
-				// Use the cell value directly from the row
 				cell := row.Cells[colIndex]
-				// Format the cell value - simple formatting for now
-				if cell.Type == table.Float {
-					if f, ok := cell.Value.(float64); ok {
-						cellValue = fmt.Sprintf("%.2f", f)
-					} else {
-						cellValue = fmt.Sprintf("%v", cell.Value)
-					}
-				} else {
-					cellValue = fmt.Sprintf("%v", cell.Value)
-				}
+				cellVal = cell.Value
+				// Use the column's formatter
+				cellValue = col.Formatter(cell.Value)
 			}
 
 			content := r.truncateText(cellValue, col.Width)
 
-			if isSelected {
-				return r.styles.SelectedRow.Width(col.Width).Render(content)
+			// Use custom renderer if available
+			if col.Renderer != nil {
+				content = col.Renderer(cellVal, isSelected)
+				content = r.truncateText(content, col.Width)
 			}
-			return r.styles.Cell.Width(col.Width).Render(content)
+
+			if isSelected {
+				return r.theme.SelectedRow.Width(col.Width).Render(content)
+			}
+			return r.theme.Cell.Width(col.Width).Render(content)
 		})
 
 		tableRows = append(tableRows, dataRow)
@@ -167,8 +141,6 @@ func (r *TableRenderer) RenderTable(tbl *table.Table, currentPage int, selectedR
 	// Join all table content
 	tableContent := strings.Join(tableRows, "\n")
 
-	// Return just the table content without status line
-	// (status is now handled by the main application's bottom bar)
 	return tableContent
 }
 
@@ -210,113 +182,109 @@ func (r *TableRenderer) distributeColumnWidths(columns []table.Column, available
 	return adjusted
 }
 
-// buildTableRow builds a single table row using a cell renderer function
+// buildTableRow builds a table row using the provided cell renderer function
 func (r *TableRenderer) buildTableRow(columns []table.Column, cellRenderer func(int, table.Column) string) string {
 	var cells []string
 	for i, col := range columns {
-		cell := cellRenderer(i, col)
-		cells = append(cells, cell)
+		cells = append(cells, cellRenderer(i, col))
 	}
 	return strings.Join(cells, "│")
 }
 
-// buildSeparatorRow builds the separator line between header and data
+// buildSeparatorRow builds a separator row between header and data
 func (r *TableRenderer) buildSeparatorRow(columns []table.Column) string {
-	var parts []string
+	var separators []string
 	for _, col := range columns {
-		// Create separator that matches the actual cell width (no extra padding needed here)
-		separator := strings.Repeat("─", col.Width)
-		parts = append(parts, separator)
+		separator := strings.Repeat("─", col.Width+2) // +2 for padding
+		separators = append(separators, separator)
 	}
-	return strings.Join(parts, "┼")
+	return strings.Join(separators, "┼")
 }
 
-// renderStatusLine renders the status/info line below the table
+// renderStatusLine renders the status line with page information
 func (r *TableRenderer) renderStatusLine(tbl *table.Table, currentPage int) string {
-	totalPages := tbl.GetTotalPages()
-	totalRows := len(tbl.Rows)
-
-	statusText := fmt.Sprintf("Page %d of %d │ %d rows │ Page size: %d",
-		currentPage+1, totalPages, totalRows, tbl.PageSize)
-
-	// Add sort information if table is sorted
-	if tbl.SortBy >= 0 && tbl.SortBy < len(tbl.Columns) {
-		sortDir := "↑"
-		if tbl.SortDesc {
-			sortDir = "↓"
-		}
-		statusText += fmt.Sprintf(" │ Sorted by: %s %s",
-			tbl.Columns[tbl.SortBy].Name, sortDir)
+	if tbl == nil {
+		return ""
 	}
 
-	return r.styles.Status.Render(statusText)
+	totalPages := tbl.GetTotalPages()
+	startRow := currentPage*tbl.PageSize + 1
+	endRow := startRow + len(tbl.GetPage(currentPage)) - 1
+
+	status := fmt.Sprintf("Page %d of %d | Rows %d-%d of %d | Page Size: %d",
+		currentPage+1, totalPages, startRow, endRow, tbl.TotalRows, tbl.PageSize)
+
+	// Add sort information
+	if tbl.SortBy >= 0 && tbl.SortBy < len(tbl.Columns) {
+		sortDir := "asc"
+		if tbl.SortDesc {
+			sortDir = "desc"
+		}
+		status += fmt.Sprintf(" | Sorted by %s (%s)", tbl.Columns[tbl.SortBy].Header, sortDir)
+	}
+
+	return r.theme.Status.Render(status)
 }
 
 // truncateText truncates text to fit within the specified width
 func (r *TableRenderer) truncateText(text string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-
 	if len(text) <= width {
 		return text
 	}
 
 	if width <= 3 {
-		return strings.Repeat(".", width)
+		return text[:width]
 	}
 
 	return text[:width-3] + "..."
 }
 
-// GetOptimalPageSize calculates the ideal number of rows based on terminal height
+// GetOptimalPageSize calculates the optimal page size based on terminal height
 func (r *TableRenderer) GetOptimalPageSize() int {
-	// Reserve space for: title (2), help text (2), status (2), header (1), separator (1), borders (2)
+	// Reserve space for header, separator, status, and some padding
 	reservedLines := 10
-
 	availableLines := r.terminalHeight - reservedLines
-	if availableLines < 5 {
-		return 5 // Minimum reasonable page size
-	}
 
-	// Cap at reasonable maximum to avoid performance issues
-	maxPageSize := 50
-	if availableLines > maxPageSize {
-		return maxPageSize
+	if availableLines < 5 {
+		return 5 // Minimum page size
 	}
 
 	return availableLines
 }
 
-// GetMaxTableHeight returns the maximum height available for table content
+// GetMaxTableHeight returns the maximum height for table content
 func (r *TableRenderer) GetMaxTableHeight() int {
-	return r.GetOptimalPageSize() + 2 // Add header and separator back
+	return r.terminalHeight - 5 // Reserve space for status and padding
 }
 
-// GetTableCapacity returns how many rows can fit in the available space
+// GetTableCapacity returns how many rows can fit in the current terminal
 func (r *TableRenderer) GetTableCapacity() int {
 	return r.GetOptimalPageSize()
 }
 
-// CalculateColumnWidths analyzes table data to suggest optimal column widths
+// CalculateColumnWidths calculates optimal column widths based on content
 func (r *TableRenderer) CalculateColumnWidths(tbl *table.Table, maxSampleRows int) []table.Column {
 	if tbl == nil || len(tbl.Columns) == 0 {
-		return tbl.Columns
+		return []table.Column{}
 	}
 
-	adjusted := make([]table.Column, len(tbl.Columns))
-	copy(adjusted, tbl.Columns)
+	columns := make([]table.Column, len(tbl.Columns))
+	copy(columns, tbl.Columns)
 
-	// Analyze actual data to determine optimal widths
-	sampleSize := int(math.Min(float64(len(tbl.Rows)), float64(maxSampleRows)))
+	// Sample up to maxSampleRows to determine optimal widths
+	sampleSize := len(tbl.Rows)
+	if sampleSize > maxSampleRows {
+		sampleSize = maxSampleRows
+	}
 
-	for colIndex, col := range adjusted {
-		maxWidth := len(col.Name) // Start with header width
+	// Calculate max width needed for each column
+	for i, col := range columns {
+		maxWidth := len(col.Header) // Start with header width
 
-		// Sample data to find reasonable column width
-		for i := 0; i < sampleSize; i++ {
-			if i < len(tbl.Rows) {
-				cellValue := tbl.GetCellValue(tbl.Rows[i].ID, colIndex)
+		// Check sample data
+		for j := 0; j < sampleSize; j++ {
+			if i < len(tbl.Rows[j].Cells) {
+				cellValue := col.Formatter(tbl.Rows[j].Cells[i].Value)
 				if len(cellValue) > maxWidth {
 					maxWidth = len(cellValue)
 				}
@@ -324,15 +292,15 @@ func (r *TableRenderer) CalculateColumnWidths(tbl *table.Table, maxSampleRows in
 		}
 
 		// Set reasonable bounds
-		if maxWidth < 8 {
-			maxWidth = 8
+		if maxWidth < 5 {
+			maxWidth = 5
 		}
-		if maxWidth > 25 {
-			maxWidth = 25
+		if maxWidth > 50 {
+			maxWidth = 50
 		}
 
-		adjusted[colIndex].Width = maxWidth
+		columns[i].Width = maxWidth
 	}
 
-	return adjusted
+	return columns
 }
